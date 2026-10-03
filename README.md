@@ -110,6 +110,15 @@ The normalized JSON follows these rules:
 - Missing lists are `[]` and missing maps are `{}`.
 - UI widget trees and raw chart data are dropped; `app` keeps compact chart summaries.
 
+`apps` keeps every known signal present in Coroot's response, including `ok` and
+`unknown` signals with no value. For example, `"signals":{"cpu":{"status":"ok"},
+"memory":{"status":"unknown"}}` differs from an absent signal. Empty values are
+omitted from JSON; absent signals stay absent. A present null/malformed signal or
+missing/unrecognized status becomes `unknown`, never healthy by default.
+This adds entries that earlier JSON/JSONL output omitted; filter by the signal's
+status instead of treating its presence as a problem. Tables still leave empty
+values blank, and raw output remains unchanged.
+
 Applications are always described the same way:
 
 ```json

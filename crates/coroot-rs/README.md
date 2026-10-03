@@ -109,6 +109,13 @@ A runnable version is in [`examples/triage.rs`](examples/triage.rs): `cargo run 
   - missing lists are `[]`.
 - `AppId` and `NodeId` are parsed ids. `AppId` gives `name()`, `namespace()`, `kind()`, `cluster_id()` and `short()`.
 - `Status` is ordered: `Unknown < Ok < Info < Warning < Critical`. `is_problem()` means warning or worse.
+- `Application::signals` retains every known signal field present in the response,
+  including empty `Ok` and `Unknown` signals. An absent field has no map entry;
+  a present null/malformed signal or missing/unrecognized status becomes `Unknown`.
+  Missing/non-string values become empty strings without changing an explicitly
+  reported status, and empty values are omitted from serialized JSON. Use
+  `signal.status.is_problem()` to select problems; map membership alone is not a
+  health verdict. This adds entries that earlier versions discarded.
 
 **Errors**
 
