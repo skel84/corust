@@ -43,11 +43,14 @@ pub struct Application {
     /// Detected technology, e.g. `postgres`, `golang`, `nginx`.
     #[serde(rename = "type", default, skip_serializing_if = "String::is_empty")]
     pub app_type: String,
-    /// The worst status of its signals.
+    /// The aggregate status reported by Coroot.
     pub status: Status,
-    /// Health signals that have a value or a non-ok status, by name: `errors`, `latency`,
-    /// `upstreams`, `instances`, `restarts`, `cpu`, `memory`, `disk_io_load`,
-    /// `disk_usage`, `network`, `dns`, `logs`.
+    /// Every known health signal present in the response, including empty `Ok` and
+    /// `Unknown` signals, by name: `errors`, `latency`, `upstreams`, `instances`,
+    /// `restarts`, `cpu`, `memory`, `disk_io_load`, `disk_usage`, `network`, `dns`, `logs`.
+    /// Absent fields are omitted. Present null or malformed signals, or signals with a
+    /// missing/unrecognized status, have `Unknown` status. Missing/non-string values
+    /// become empty strings; they do not change an explicitly reported status.
     pub signals: BTreeMap<String, Signal>,
 }
 
@@ -65,17 +68,13 @@ fn application(v: &Value) -> Application {
     let mut signals = BTreeMap::new();
     for key in SIGNALS {
         let Some(p) = v.get(key) else { continue };
-        let status = Status::parse(s(p, "status"));
-        let value = s(p, "value");
-        if !value.is_empty() || status >= Status::Info {
-            signals.insert(
-                key.to_string(),
-                Signal {
-                    status,
-                    value: value.to_string(),
-                },
-            );
-        }
+        signals.insert(
+            key.to_string(),
+            Signal {
+                status: Status::parse(s(p, "status")),
+                value: s(p, "value").to_string(),
+            },
+        );
     }
     Application {
         id: AppId::new(s(v, "id")),
@@ -439,11 +438,100 @@ mod tests {
         assert_eq!(r["type"], "golang");
         assert_eq!(
             r["signals"],
-            json!({"errors": {"status": "warning"}, "latency": {"status": "ok", "value": "5ms"}})
+            json!({
+                "errors": {"status": "warning"},
+                "latency": {"status": "ok", "value": "5ms"},
+                "cpu": {"status": "unknown"},
+            })
         );
         let back: Application = serde_json::from_value(r).unwrap();
         assert_eq!(back.id, app.id);
         assert_eq!(back.signals, app.signals);
+    }
+
+    #[test]
+    fn empty_signal_states_survive_serialization() {
+        let app = application(&json!({
+            "id": "c:prod:Deployment:api", "status": "critical",
+            "cpu": {"status": "ok", "value": ""},
+            "memory": {"status": "unknown", "value": ""},
+            "instances": {"status": "info", "value": ""},
+            "errors": {"status": "warning", "value": ""},
+            "latency": {"status": "critical", "value": ""},
+        }));
+        assert_eq!(app.status, Status::Critical);
+        for (name, status) in [
+            ("cpu", Status::Ok),
+            ("memory", Status::Unknown),
+            ("instances", Status::Info),
+            ("errors", Status::Warning),
+            ("latency", Status::Critical),
+        ] {
+            assert_eq!(app.signals[name].status, status);
+            assert!(app.signals[name].value.is_empty());
+        }
+        assert!(!app.signals.contains_key("logs"));
+
+        let encoded = serde_json::to_value(&app).unwrap();
+        assert_eq!(
+            encoded["signals"],
+            json!({
+                "cpu": {"status": "ok"},
+                "memory": {"status": "unknown"},
+                "instances": {"status": "info"},
+                "errors": {"status": "warning"},
+                "latency": {"status": "critical"},
+            })
+        );
+        let decoded: Application = serde_json::from_value(encoded).unwrap();
+        assert_eq!(decoded.signals, app.signals);
+    }
+
+    #[test]
+    fn absent_and_malformed_signals_do_not_become_healthy() {
+        let absent = application(&json!({"id": "c:prod:Deployment:api", "status": "ok"}));
+        assert!(absent.signals.is_empty());
+        assert_eq!(serde_json::to_value(&absent).unwrap()["signals"], json!({}));
+
+        for signal in [
+            Value::Null,
+            json!(false),
+            json!(42),
+            json!("ok"),
+            json!([]),
+            json!({}),
+            json!({"status": null}),
+            json!({"status": true}),
+            json!({"status": "unrecognized"}),
+            json!({"status": ["ok"]}),
+        ] {
+            let app = application(&json!({
+                "id": "c:prod:Deployment:api", "status": "ok", "cpu": signal,
+            }));
+            assert_eq!(app.signals.len(), 1, "{signal}");
+            assert_eq!(app.signals["cpu"].status, Status::Unknown, "{signal}");
+            assert!(app.signals["cpu"].value.is_empty(), "{signal}");
+            // A signal's missing evidence does not replace Coroot's aggregate status.
+            assert_eq!(app.status, Status::Ok);
+            assert_eq!(
+                serde_json::to_value(&app).unwrap()["signals"],
+                json!({"cpu": {"status": "unknown"}}),
+                "{signal}"
+            );
+        }
+    }
+
+    #[test]
+    fn signals_preserve_reported_status_without_a_text_value() {
+        for signal in [
+            json!({"status": "ok"}),
+            json!({"status": "ok", "value": null}),
+            json!({"status": "ok", "value": 42}),
+        ] {
+            let app = application(&json!({"cpu": signal}));
+            assert_eq!(app.signals["cpu"].status, Status::Ok, "{signal}");
+            assert!(app.signals["cpu"].value.is_empty(), "{signal}");
+        }
     }
 
     #[test]
