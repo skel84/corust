@@ -21,6 +21,8 @@ pub enum Kind {
     Server,
     /// The Coroot version does not support the requested feature.
     Unsupported,
+    /// A response was larger than CORUST_MAX_RESPONSE_BYTES allows.
+    ResponseTooLarge,
 }
 
 impl Kind {
@@ -34,6 +36,7 @@ impl Kind {
             Kind::Network => 7,
             Kind::Server => 8,
             Kind::Unsupported => 9,
+            Kind::ResponseTooLarge => 10,
         }
     }
 }
@@ -91,6 +94,7 @@ fn from_lib(e: &coroot_rs::Error) -> Option<CliError> {
         K::Ambiguous => Kind::Ambiguous,
         K::Network => Kind::Network,
         K::Unsupported => Kind::Unsupported,
+        K::ResponseTooLarge => Kind::ResponseTooLarge,
         // Malformed responses stay untyped (exit code 1).
         K::Decode => return None,
         _ => Kind::Server,
@@ -206,5 +210,11 @@ mod tests {
         );
         let e = anyhow::Error::new(coroot_rs::Error::new(coroot_rs::ErrorKind::Decode, "bad"));
         assert_eq!(exit_code(&e), 1);
+        let e = anyhow::Error::new(coroot_rs::Error::new(
+            coroot_rs::ErrorKind::ResponseTooLarge,
+            "too big",
+        ));
+        assert_eq!(exit_code(&e), 10);
+        assert_eq!(typed(&e).unwrap().kind, Kind::ResponseTooLarge);
     }
 }

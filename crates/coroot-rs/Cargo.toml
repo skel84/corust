@@ -19,4 +19,4 @@ thiserror = "2"
 url.workspace = true
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["macros", "rt"] }
+tokio = { workspace = true, features = ["io-util", "macros", "net", "rt", "time"] }

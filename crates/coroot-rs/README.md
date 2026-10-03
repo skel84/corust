@@ -79,9 +79,9 @@ A runnable version is in [`examples/triage.rs`](examples/triage.rs): `cargo run 
 
 - Build it with `Client::builder(url)`.
 - Authenticate with `.api_key(..)`, `.session(..)`, or `.login(email, password).await`.
-- Other builder options: `.timeout(..)`, `.connect_timeout(..)`, `.accept_invalid_certs(..)`, `.user_agent(..)`, `.http_client(..)`, and `.on_payload(..)` (described below).
+- Other builder options: `.timeout(..)`, `.connect_timeout(..)`, `.accept_invalid_certs(..)`, `.user_agent(..)`, `.http_client(..)`, `.max_response_bytes(..)` (described below) and `.on_payload(..)` (described below).
 - Methods: `user()`, `projects()`, `project(id)`, `find_project(id_or_name)`, `mcp()`.
-- For endpoints this crate does not wrap: `request()` with `execute()`, `get_json()`, `send_json()`.
+- For endpoints this crate does not wrap: `request()` with `execute()` and `read_body()`, `get_json()`, `send_json()`.
 
 **`Project`** is the entry point for data. It carries a `TimeRange`, which `with_range` replaces. Its methods:
 
@@ -132,8 +132,11 @@ Every `Error` has an `ErrorKind`:
 | `Server` | Coroot returned an error (5xx, an error in the payload, an invalid license) |
 | `Unsupported` | The server lacks the endpoint or feature (older Coroot, logs not configured) |
 | `Decode` | A response this crate could not parse |
+| `ResponseTooLarge` | A response body exceeded `max_response_bytes`; `response_limit()` gives the limit and `http_status()` the status |
 
 `Ambiguous` and `NotFound` errors carry `candidates()` (for example the projects that exist). `message()` is a sentence you can show as is, and `http_status()` gives the HTTP status when there is one. The `ErrorKind` enum is `#[non_exhaustive]`, so a `match` needs a wildcard arm.
+
+**Bounding responses.** `ClientBuilder::max_response_bytes(n)` caps every response body the client reads: data, error responses and MCP (JSON and SSE). A body whose `Content-Length` is over the limit is rejected before it is read; otherwise reading stops as soon as the limit is passed. Either way nothing is decoded and the error is `ResponseTooLarge`. The limit applies per response and counts the body bytes reqwest yields: what Coroot sends, or the decompressed bytes if you pass a decompressing client with `http_client`. There is no limit by default. `Client::execute` leaves a successful body unread, so read it with `Client::read_body` to apply the limit.
 
 **Observing payloads.** `ClientBuilder::on_payload` is called with every JSON payload Coroot returns. Use it for debugging, recording fixtures, or showing the raw data.
 
