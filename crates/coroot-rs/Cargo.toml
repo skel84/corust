@@ -1,0 +1,22 @@
+[package]
+name = "coroot-rs"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+description = "Async client for the Coroot observability platform: applications, incidents, alerts, logs, traces, metrics and the service map as typed Rust values"
+license = "MIT OR Apache-2.0"
+readme = "README.md"
+keywords = ["coroot", "observability", "monitoring", "kubernetes", "api"]
+categories = ["api-bindings", "web-programming::http-client"]
+
+[dependencies]
+chrono = { workspace = true, features = ["serde"] }
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror = "2"
+url.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt"] }

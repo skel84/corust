@@ -1,0 +1,36 @@
+[package]
+name = "corust"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+description = "A command-line client for Coroot, the open-source observability platform"
+license = "Apache-2.0"
+readme = "../../README.md"
+keywords = ["coroot", "observability", "cli", "monitoring"]
+categories = ["command-line-utilities"]
+
+[[bin]]
+name = "corust"
+path = "src/main.rs"
+
+[dependencies]
+coroot-rs.workspace = true
+anyhow = "1"
+chrono.workspace = true
+clap = { version = "4", features = ["derive", "env", "wrap_help"] }
+clap_complete = "4"
+dirs = "6"
+libc = "0.2"
+reqwest.workspace = true
+rpassword = "7"
+serde.workspace = true
+serde_json.workspace = true
+terminal_size = "0.4"
+tokio = { workspace = true, features = ["rt", "time"] }
+toml = "0.8"
+unicode-width = "0.2"
+url.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
