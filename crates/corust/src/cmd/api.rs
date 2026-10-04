@@ -56,10 +56,8 @@ pub async fn api(ctx: &Ctx, args: ApiArgs) -> Result<()> {
         rb = rb.header(CONTENT_TYPE, "application/json").body(body);
     }
     let resp = ctx.client.execute(rb).await?;
-    let text = resp
-        .text()
-        .await
-        .map_err(|e| err(Kind::Network, format!("cannot read the response: {e}")))?;
+    let body = ctx.client.read_body(resp).await?;
+    let text = String::from_utf8_lossy(&body);
     if path.starts_with("api/") && is_html(&text) {
         return Err(err(
             Kind::NotFound,

@@ -72,6 +72,7 @@ pub struct ClientBuilder {
     user_agent: String,
     http: Option<reqwest::Client>,
     observer: Option<Observer>,
+    max_response_bytes: Option<u64>,
 }
 
 impl ClientBuilder {
@@ -123,6 +124,21 @@ impl ClientBuilder {
         self
     }
 
+    /// Fails any response whose body is larger than `bytes` with
+    /// [`ErrorKind::ResponseTooLarge`], before anything is decoded. Applies to every body
+    /// this crate reads (data, error responses, MCP) and to [`Client::read_body`], also
+    /// with [`ClientBuilder::http_client`]. Default: no limit.
+    ///
+    /// A body is rejected without reading it when its `Content-Length` is over the limit,
+    /// and otherwise as soon as the bytes read pass it. The limit counts the body bytes
+    /// reqwest yields, after transfer decoding. The client this builder creates does not
+    /// request compression, so those are the bytes Coroot sends; with a decompressing
+    /// client from [`ClientBuilder::http_client`], they are the decompressed bytes.
+    pub fn max_response_bytes(mut self, bytes: u64) -> Self {
+        self.max_response_bytes = Some(bytes);
+        self
+    }
+
     /// Calls `f` with every JSON payload Coroot returns, before normalization: useful for
     /// logging, debugging, or recording test fixtures.
     pub fn on_payload(mut self, f: impl Fn(&Payload) + Send + Sync + 'static) -> Self {
@@ -156,6 +172,7 @@ impl ClientBuilder {
                 base,
                 credentials: self.credentials,
                 observer: self.observer,
+                max_response_bytes: self.max_response_bytes,
             }),
         })
     }
@@ -195,6 +212,7 @@ impl ClientBuilder {
                 base: inner.base.clone(),
                 credentials: Credentials::Session(cookie),
                 observer: self.observer,
+                max_response_bytes: inner.max_response_bytes,
             }),
         })
     }
@@ -206,6 +224,7 @@ impl fmt::Debug for ClientBuilder {
             .field("url", &self.url)
             .field("credentials", &self.credentials)
             .field("timeout", &self.timeout)
+            .field("max_response_bytes", &self.max_response_bytes)
             .finish_non_exhaustive()
     }
 }
@@ -233,6 +252,7 @@ struct Inner {
     base: Url,
     credentials: Credentials,
     observer: Option<Observer>,
+    max_response_bytes: Option<u64>,
 }
 
 impl fmt::Debug for Client {
@@ -349,6 +369,7 @@ impl Client {
             user_agent: USER_AGENT.to_string(),
             http: None,
             observer: None,
+            max_response_bytes: None,
         }
     }
 
@@ -416,15 +437,54 @@ impl Client {
         })
     }
 
-    /// Sends a request; HTTP error statuses become typed errors.
+    /// Sends a request; HTTP error statuses become typed errors. The body of a successful
+    /// response is left unread: read it with [`Client::read_body`] to apply
+    /// [`ClientBuilder::max_response_bytes`].
     pub async fn execute(&self, rb: RequestBuilder) -> Result<Response> {
         let resp = rb.send().await.map_err(|e| self.network_error(e))?;
         let status = resp.status();
         if status.is_success() {
             return Ok(resp);
         }
-        let body = resp.text().await.unwrap_or_default().trim().to_string();
+        let body = match self.read_body(resp).await {
+            Ok(b) => String::from_utf8_lossy(&b).trim().to_string(),
+            Err(e) if e.kind() == ErrorKind::ResponseTooLarge => return Err(e),
+            // The status alone still says what went wrong.
+            Err(_) => String::new(),
+        };
         Err(self.http_error(status.as_u16(), &body))
+    }
+
+    /// Reads a response body, failing with [`ErrorKind::ResponseTooLarge`] when it is
+    /// larger than [`ClientBuilder::max_response_bytes`]. Every body this crate reads goes
+    /// through here.
+    pub async fn read_body(&self, mut resp: Response) -> Result<Vec<u8>> {
+        let limit = self.inner.max_response_bytes;
+        let too_large = |resp: &Response, limit| {
+            Error::too_large(resp.url().path(), limit, resp.status().as_u16())
+        };
+        if let (Some(limit), Some(len)) = (limit, resp.content_length())
+            && len > limit
+        {
+            return Err(too_large(&resp, limit));
+        }
+        let mut body = Vec::new();
+        while let Some(chunk) = resp.chunk().await.map_err(|e| {
+            Error::new(ErrorKind::Network, format!("cannot read the response: {e}")).with_source(e)
+        })? {
+            if let Some(limit) = limit
+                && (body.len() + chunk.len()) as u64 > limit
+            {
+                return Err(too_large(&resp, limit));
+            }
+            body.extend_from_slice(&chunk);
+        }
+        Ok(body)
+    }
+
+    /// The limit set with [`ClientBuilder::max_response_bytes`].
+    pub fn max_response_bytes(&self) -> Option<u64> {
+        self.inner.max_response_bytes
     }
 
     /// GET a JSON document. `path` is relative to the base URL, e.g. `api/user`.
@@ -434,7 +494,7 @@ impl Client {
             .header(ACCEPT, "application/json")
             .query(query);
         let resp = self.execute(rb).await?;
-        let v = parse_json(resp).await?;
+        let v = parse_json(&self.read_body(resp).await?)?;
         self.observe(path, &v);
         Ok(v)
     }
@@ -453,13 +513,8 @@ impl Client {
                 .header(CONTENT_TYPE, "application/json")
                 .body(serde_json::to_vec(b)?);
         }
-        let text = self
-            .execute(rb)
-            .await?
-            .text()
-            .await
-            .map_err(|e| self.network_error(e))?;
-        let v = serde_json::from_str(&text).unwrap_or(Value::Null);
+        let resp = self.execute(rb).await?;
+        let v = serde_json::from_slice(&self.read_body(resp).await?).unwrap_or(Value::Null);
         self.observe(path, &v);
         Ok(v)
     }
@@ -567,11 +622,8 @@ fn find_project<'a>(projects: &'a [ProjectInfo], q: &str) -> Result<&'a ProjectI
         })
 }
 
-async fn parse_json(resp: Response) -> Result<Value> {
-    let text = resp
-        .text()
-        .await
-        .map_err(|e| Error::new(ErrorKind::Network, format!("cannot read the response: {e}")))?;
+fn parse_json(body: &[u8]) -> Result<Value> {
+    let text = String::from_utf8_lossy(body);
     if text.trim().is_empty() {
         return Ok(Value::Null);
     }

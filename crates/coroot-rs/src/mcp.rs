@@ -131,12 +131,8 @@ impl McpSession {
             .get(CONTENT_TYPE)
             .and_then(|v| v.to_str().ok())
             .is_some_and(|ct| ct.starts_with("text/event-stream"));
-        let text = resp.text().await.map_err(|e| {
-            Error::new(
-                ErrorKind::Network,
-                format!("cannot read the MCP response: {e}"),
-            )
-        })?;
+        let body = self.client.read_body(resp).await?;
+        let text = String::from_utf8_lossy(&body);
         let msg = if is_sse {
             find_sse_response(&text, id)?
         } else {

@@ -134,16 +134,19 @@ pub async fn run(cli: Cli) -> Result<()> {
     }
 }
 
-/// A client with corust's defaults: user agent and the CORUST_TIMEOUT override.
+/// A client with corust's defaults: user agent, and the CORUST_TIMEOUT and
+/// CORUST_MAX_RESPONSE_BYTES overrides.
 pub fn client_builder(url: &str) -> coroot_rs::ClientBuilder {
-    Client::builder(url)
+    let env_u64 = |name| std::env::var(name).ok().and_then(|v| v.parse::<u64>().ok());
+    let builder = Client::builder(url)
         .user_agent(concat!("corust/", env!("CARGO_PKG_VERSION")))
         .timeout(Duration::from_secs(
-            std::env::var("CORUST_TIMEOUT")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(120),
-        ))
+            env_u64("CORUST_TIMEOUT").unwrap_or(120),
+        ));
+    match env_u64("CORUST_MAX_RESPONSE_BYTES") {
+        Some(limit) => builder.max_response_bytes(limit),
+        None => builder,
+    }
 }
 
 /// Builds a client from flags, environment, and the selected context (in that order of precedence).

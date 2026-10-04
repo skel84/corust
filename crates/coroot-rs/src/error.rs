@@ -34,6 +34,11 @@ pub enum ErrorKind {
     Unsupported,
     /// Coroot answered with something this crate could not understand.
     Decode,
+    /// A response body was larger than [`ClientBuilder::max_response_bytes`]
+    /// allows; see [`Error::response_limit`]. Nothing was decoded.
+    ///
+    /// [`ClientBuilder::max_response_bytes`]: crate::ClientBuilder::max_response_bytes
+    ResponseTooLarge,
 }
 
 /// An error from talking to Coroot.
@@ -43,6 +48,7 @@ pub struct Error {
     message: String,
     candidates: Vec<String>,
     status: Option<u16>,
+    limit: Option<u64>,
     #[source]
     source: Option<Box<dyn std::error::Error + Send + Sync>>,
 }
@@ -55,6 +61,7 @@ impl Error {
             message: message.into(),
             candidates: Vec::new(),
             status: None,
+            limit: None,
             source: None,
         }
     }
@@ -68,6 +75,17 @@ impl Error {
     pub(crate) fn with_status(mut self, status: u16) -> Self {
         self.status = Some(status);
         self
+    }
+
+    /// A [`ErrorKind::ResponseTooLarge`] error for a body over `limit` bytes.
+    pub(crate) fn too_large(endpoint: &str, limit: u64, status: u16) -> Self {
+        let mut e = Error::new(
+            ErrorKind::ResponseTooLarge,
+            format!("the response from {endpoint} exceeds the limit of {limit} bytes"),
+        )
+        .with_status(status);
+        e.limit = Some(limit);
+        e
     }
 
     pub(crate) fn with_source(
@@ -97,6 +115,11 @@ impl Error {
     /// The HTTP status code, when the error came from an HTTP response.
     pub fn http_status(&self) -> Option<u16> {
         self.status
+    }
+
+    /// For [`ErrorKind::ResponseTooLarge`] errors: the limit in bytes that was exceeded.
+    pub fn response_limit(&self) -> Option<u64> {
+        self.limit
     }
 
     pub(crate) fn invalid(message: impl Into<String>) -> Self {

@@ -48,6 +48,7 @@ Other global settings:
 | `--insecure` | Skip TLS certificate verification (also stored in the context at login) |
 | `--no-color`, `NO_COLOR` | No ANSI colors in tables (colors are off anyway when stdout is not a terminal) |
 | `CORUST_TIMEOUT` | Request timeout in seconds (default 120) |
+| `CORUST_MAX_RESPONSE_BYTES` | Fail any response larger than this many bytes, before decoding it (default: no limit) |
 
 ## Commands
 
@@ -178,6 +179,7 @@ Errors are written to stderr. When output is machine-readable, the error is a si
 | 7 | `network` | Coroot is unreachable |
 | 8 | `server` | Coroot returned an error |
 | 9 | `unsupported` | This Coroot version lacks the endpoint |
+| 10 | `response_too_large` | A response exceeded `CORUST_MAX_RESPONSE_BYTES` |
 
 ## Examples for agents and scripts
 
