@@ -329,10 +329,14 @@ impl ServiceMap {
 }
 
 impl Project {
-    /// The whole service map, sorted by status.
+    /// The whole service map, sorted by status. Empty when the project has no
+    /// applications or Coroot has no data for it yet; a response without the map fails
+    /// with [`ErrorKind::Decode`](crate::ErrorKind).
     pub async fn service_map(&self) -> Result<ServiceMap> {
         let env = self.get("overview/map", &[]).await?;
-        Ok(ServiceMap::from_overview(json::arr_p(&env.data, "/map")))
+        Ok(ServiceMap::from_overview(
+            env.required_list("overview/map", "map")?,
+        ))
     }
 }
 

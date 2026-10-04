@@ -353,6 +353,34 @@ impl Envelope {
         }
         Ok(self)
     }
+
+    /// The list of objects at `data.<key>`, for responses where Coroot always sends that
+    /// list. Coroot sends `null` for an empty list, and `data: null` when it has no data
+    /// for the project yet; both are empty. Anything else that is not a list of objects,
+    /// including a missing key or a body that is not a `{context, data}` envelope, fails
+    /// with [`ErrorKind::Decode`] instead of passing for "nothing there".
+    pub(crate) fn required_list(&self, endpoint: &str, key: &str) -> Result<&[Value]> {
+        let malformed =
+            |why: String| Error::decode(format!("unexpected response from {endpoint}: {why}"));
+        if !self.context.is_object() {
+            return Err(malformed("not a Coroot {context, data} response".into()));
+        }
+        let data = match &self.data {
+            Value::Null => return Ok(&[]),
+            Value::Object(m) => m,
+            _ => return Err(malformed("`data` is not an object".into())),
+        };
+        let items = match data.get(key) {
+            None => return Err(malformed(format!("`data.{key}` is missing"))),
+            Some(Value::Null) => return Ok(&[]),
+            Some(Value::Array(items)) => items,
+            Some(_) => return Err(malformed(format!("`data.{key}` is not a list"))),
+        };
+        if let Some(i) = items.iter().position(|v| !v.is_object()) {
+            return Err(malformed(format!("`data.{key}[{i}]` is not an object")));
+        }
+        Ok(items)
+    }
 }
 
 impl Client {

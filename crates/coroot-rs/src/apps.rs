@@ -385,10 +385,13 @@ fn rest_health(id: &AppId, env: &Envelope) -> AppHealth {
 }
 
 impl Project {
-    /// All applications, most severe status first, then by id.
+    /// All applications, most severe status first, then by id. Empty when the project has
+    /// none or Coroot has no data for it yet; a response without the application list
+    /// fails with [`ErrorKind::Decode`](crate::ErrorKind).
     pub async fn applications(&self) -> Result<Vec<Application>> {
         let env = self.get("overview/applications", &[]).await?;
-        let mut apps: Vec<Application> = json::arr_p(&env.data, "/applications")
+        let mut apps: Vec<Application> = env
+            .required_list("overview/applications", "applications")?
             .iter()
             .map(application)
             .collect();
