@@ -6,7 +6,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::id::AppId;
 use crate::json::{self, arr, s};
 use crate::project::Project;
@@ -168,6 +168,220 @@ pub struct BurnRate {
     pub threshold: Option<f64>,
 }
 
+/// An incident detail response, including the SLO presentation reported by Coroot.
+/// The application owns selection; this value owns one server observation.
+/// Charts and RCA widgets are not decoded by this API.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IncidentView {
+    incident: Incident,
+    availability: Option<SloObjective>,
+    latency: Option<SloObjective>,
+}
+
+impl IncidentView {
+    /// Incident identity, impact, burn rates and RCA evidence.
+    pub fn incident(&self) -> &Incident {
+        &self.incident
+    }
+    /// Availability objective, absent when Coroot did not report an SLI.
+    pub fn availability(&self) -> Option<&SloObjective> {
+        self.availability.as_ref()
+    }
+    /// Latency objective, absent when Coroot did not report an SLI.
+    pub fn latency(&self) -> Option<&SloObjective> {
+        self.latency.as_ref()
+    }
+}
+
+/// Coroot's SLO objective and compliance text. These are server-rendered strings,
+/// not percentages that can safely be parsed or recomputed from incident impact.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SloObjective {
+    objective: String,
+    compliance: String,
+    violated: bool,
+    latency_threshold_seconds: Option<f64>,
+}
+impl SloObjective {
+    /// Objective text as reported by the server.
+    pub fn objective(&self) -> &str {
+        &self.objective
+    }
+    /// Compliance text as reported by the server.
+    pub fn compliance(&self) -> &str {
+        &self.compliance
+    }
+    /// Whether Coroot marked this objective violated.
+    pub fn is_violated(&self) -> bool {
+        self.violated
+    }
+    /// Latency threshold in seconds; absent for availability or an omitted value.
+    pub fn latency_threshold_seconds(&self) -> Option<f64> {
+        self.latency_threshold_seconds
+    }
+}
+
+fn shape(field: &str) -> Error {
+    Error::decode(format!(
+        "unexpected incident response: invalid or missing {field}"
+    ))
+}
+
+fn optional_object<'a>(v: &'a Value, field: &str) -> Result<Option<&'a Value>> {
+    match v.get(field) {
+        None | Some(Value::Null) => Ok(None),
+        Some(value) if value.is_object() => Ok(Some(value)),
+        _ => Err(shape(field)),
+    }
+}
+
+fn optional_list<'a>(v: &'a Value, field: &str) -> Result<&'a [Value]> {
+    match v.get(field) {
+        None | Some(Value::Null) => Ok(&[]),
+        Some(Value::Array(values)) if values.iter().all(Value::is_object) => Ok(values),
+        _ => Err(shape(field)),
+    }
+}
+
+fn validate_incident(v: &Value) -> Result<()> {
+    for field in [
+        "key",
+        "application_id",
+        "severity",
+        "cluster",
+        "short_description",
+    ] {
+        let value = v
+            .get(field)
+            .and_then(Value::as_str)
+            .ok_or_else(|| shape(field))?;
+        if matches!(field, "key" | "application_id") && value.is_empty() {
+            return Err(shape(field));
+        }
+    }
+    if v.get("impact").and_then(Value::as_f64).is_none() {
+        return Err(shape("impact"));
+    }
+    if v.get("duration")
+        .and_then(Value::as_i64)
+        .is_none_or(|n| n < 0)
+    {
+        return Err(shape("duration"));
+    }
+    for field in ["opened_at", "resolved_at"] {
+        match v.get(field) {
+            Some(Value::Null) => {}
+            Some(value)
+                if value
+                    .as_i64()
+                    .is_some_and(|n| n >= 0 && (n == 0 || json::time_ms(n).is_some())) => {}
+            _ => return Err(shape(field)),
+        }
+    }
+    if let Some(details) = optional_object(v, "details")? {
+        for field in ["availability_impact", "latency_impact"] {
+            if let Some(impact) = optional_object(details, field)? {
+                match impact.get("percentage") {
+                    None | Some(Value::Null) => {}
+                    Some(n) if n.is_number() => {}
+                    _ => return Err(shape(field)),
+                }
+            }
+        }
+        for field in ["availability_burn_rates", "latency_burn_rates"] {
+            for rate in optional_list(details, field)? {
+                if rate.get("severity").and_then(Value::as_str).is_none() {
+                    return Err(shape(field));
+                }
+                for window in ["long_window", "short_window"] {
+                    if rate
+                        .get(window)
+                        .and_then(Value::as_i64)
+                        .is_none_or(|n| n < 0)
+                    {
+                        return Err(shape(window));
+                    }
+                }
+                for number in [
+                    "long_window_burn_rate",
+                    "short_window_burn_rate",
+                    "threshold",
+                ] {
+                    match rate.get(number) {
+                        None | Some(Value::Null) => {}
+                        Some(n) if n.is_number() => {}
+                        _ => return Err(shape(number)),
+                    }
+                }
+            }
+        }
+    }
+    if let Some(rca) = optional_object(v, "rca")? {
+        for field in [
+            "status",
+            "short_summary",
+            "root_cause",
+            "immediate_fixes",
+            "detailed_root_cause_analysis",
+            "error",
+        ] {
+            if rca.get(field).is_some_and(|value| !value.is_string()) {
+                return Err(shape(field));
+            }
+        }
+        if let Some(map) = optional_object(rca, "propagation_map")? {
+            for app in optional_list(map, "applications")? {
+                if app
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .is_none_or(str::is_empty)
+                    || app.get("status").and_then(Value::as_str).is_none()
+                {
+                    return Err(shape("propagation application"));
+                }
+                match app.get("issues") {
+                    None | Some(Value::Null) => {}
+                    Some(Value::Array(issues)) if issues.iter().all(Value::is_string) => {}
+                    _ => return Err(shape("propagation issues")),
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn objective(v: &Value, field: &str, latency: bool) -> Result<Option<SloObjective>> {
+    let Some(value) = optional_object(v, field)? else {
+        return Ok(None);
+    };
+    let objective = value
+        .get("objective")
+        .and_then(Value::as_str)
+        .ok_or_else(|| shape(field))?;
+    let compliance = value
+        .get("compliance")
+        .and_then(Value::as_str)
+        .ok_or_else(|| shape(field))?;
+    let violated = value
+        .get("violated")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| shape(field))?;
+    let threshold = match value.get("threshold") {
+        None | Some(Value::Null) => None,
+        Some(n) => Some(
+            n.as_f64()
+                .filter(|n| *n >= 0.)
+                .ok_or_else(|| shape(field))?,
+        ),
+    };
+    Ok(Some(SloObjective {
+        objective: objective.into(),
+        compliance: compliance.into(),
+        violated,
+        latency_threshold_seconds: latency.then_some(threshold).flatten(),
+    }))
+}
+
 fn burn_rates(v: &Value, key: &str) -> Vec<BurnRate> {
     arr(v, key)
         .iter()
@@ -215,7 +429,7 @@ pub(crate) fn incident(v: &Value, detailed: bool) -> Incident {
     });
     let d = v.get("details").unwrap_or(&Value::Null);
     let pct = |key: &str| d.get(key).and_then(|x| json::f(x, "percentage"));
-    let slo = detailed.then(|| Slo {
+    let slo = (detailed && d.is_object()).then(|| Slo {
         availability_impact_percent: pct("availability_impact"),
         latency_impact_percent: pct("latency_impact"),
         availability_burn_rates: burn_rates(d, "availability_burn_rates"),
@@ -244,21 +458,41 @@ pub(crate) fn incident(v: &Value, detailed: bool) -> Incident {
 
 impl Project {
     /// Incidents: open ones first, then the most recently opened (Coroot's order).
+    /// This is a bounded sample, not a complete history or total count. State/app
+    /// filters are applied to that sample. `data: null` means no world is available
+    /// yet and returns an empty sample. Malformed collections fail with Decode.
     pub async fn incidents(&self, q: &IncidentQuery) -> Result<Vec<Incident>> {
         // Filtering happens client-side, so fetch more than requested when filters are set.
         let fetch = if q.app.is_some() || q.state != StateFilter::Any {
-            (q.limit * 10).max(500)
+            q.limit.saturating_mul(10).max(500)
         } else {
             q.limit
         };
+        if fetch > u32::MAX as usize {
+            return Err(Error::invalid(
+                "incident limit exceeds the server's u32 range",
+            ));
+        }
         let env = self
             .get("incidents", &[("limit", fetch.to_string())])
             .await?;
-        Ok(env
-            .data
-            .as_array()
-            .into_iter()
-            .flatten()
+        if !env.context.is_object() {
+            return Err(shape("{context, data} envelope"));
+        }
+        let items = match &env.data {
+            Value::Null => return Ok(Vec::new()),
+            Value::Array(items) => items,
+            _ => return Err(shape("incident list")),
+        };
+        for item in items {
+            validate_incident(item)?;
+        }
+        let mut keys = std::collections::HashSet::new();
+        if items.iter().any(|i| !keys.insert(s(i, "key"))) {
+            return Err(shape("duplicate incident key"));
+        }
+        Ok(items
+            .iter()
             .filter(|i| {
                 q.app
                     .as_ref()
@@ -279,10 +513,32 @@ impl Project {
 
     /// One incident with the full root cause analysis and SLO details.
     pub async fn incident(&self, key: &str) -> Result<Incident> {
+        Ok(self.incident_view(key).await?.incident)
+    }
+
+    /// One incident with Coroot's optional objective/compliance presentation.
+    /// An unavailable world (`data: null`) is a Decode error, never an empty incident.
+    /// The returned identity must match `key`. Existing [`Self::incident`] callers
+    /// retain their normalized type and now receive the same response validation.
+    pub async fn incident_view(&self, key: &str) -> Result<IncidentView> {
+        if key.is_empty() {
+            return Err(Error::invalid("incident key is empty"));
+        }
         let env = self
             .get(&format!("incident/{}", encode_segment(key)), &[])
             .await?;
-        Ok(incident(&env.data, true))
+        if !env.context.is_object() {
+            return Err(shape("{context, data} envelope"));
+        }
+        validate_incident(&env.data)?;
+        if s(&env.data, "key") != key {
+            return Err(shape("incident key does not match request"));
+        }
+        Ok(IncidentView {
+            incident: incident(&env.data, true),
+            availability: objective(&env.data, "availability_slo", false)?,
+            latency: objective(&env.data, "latency_slo", true)?,
+        })
     }
 }
 

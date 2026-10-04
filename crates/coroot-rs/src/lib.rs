@@ -96,7 +96,8 @@ pub use apps::{
     Report, SeriesSummary, Signal,
 };
 pub use incidents::{
-    BurnRate, Incident, IncidentQuery, IncidentState, Propagation, Rca, Slo, StateFilter,
+    BurnRate, Incident, IncidentQuery, IncidentState, IncidentView, Propagation, Rca, Slo,
+    SloObjective, StateFilter,
 };
 pub use logs::{
     FilterOp, LogCursor, LogEntry, LogFilter, LogPage, LogPattern, LogQuery, LogSource,
