@@ -198,6 +198,32 @@ async fn filtering_is_bounded_and_resolved_state_consistent() {
 }
 
 #[tokio::test]
+async fn invalid_limits_and_oversized_server_samples_fail() {
+    let p = project_answering(&envelope(json!([item(), item()]))).await;
+    assert_eq!(
+        p.incidents(&IncidentQuery {
+            state: StateFilter::Any,
+            limit: 1,
+            ..IncidentQuery::default()
+        })
+        .await
+        .unwrap_err()
+        .kind(),
+        ErrorKind::Decode
+    );
+    assert_eq!(
+        p.incidents(&IncidentQuery {
+            limit: usize::MAX,
+            ..IncidentQuery::default()
+        })
+        .await
+        .unwrap_err()
+        .kind(),
+        ErrorKind::InvalidInput
+    );
+}
+
+#[tokio::test]
 async fn http_and_context_errors_keep_their_kinds() {
     for (status, kind) in [
         ("401 Unauthorized", ErrorKind::Auth),

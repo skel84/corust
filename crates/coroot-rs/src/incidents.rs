@@ -484,6 +484,9 @@ impl Project {
             Value::Array(items) => items,
             _ => return Err(shape("incident list")),
         };
+        if items.len() > fetch {
+            return Err(shape("incident list exceeds requested limit"));
+        }
         for item in items {
             validate_incident(item)?;
         }
