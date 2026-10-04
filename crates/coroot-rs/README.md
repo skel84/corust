@@ -91,7 +91,7 @@ A runnable version is in [`examples/triage.rs`](examples/triage.rs): `cargo run 
 | Applications | `applications`, `app_health`, `app_health_rest`, `resolve_app`, `application_ids` |
 | Service map | `service_map`, then `ServiceMap::focus`, `retain_problems`, `find`, `node` |
 | Nodes | `nodes`, `node`, `resolve_node`, `node_ids` |
-| Incidents | `incidents(&IncidentQuery)`, `incident(key)` with RCA and SLO burn rates |
+| Incidents | `incidents(&IncidentQuery)`, `incident(key)`, `incident_view(key)` with RCA, SLO burn rates and source objective/compliance |
 | Alerts | `alerts(&AlertQuery)`, `alert`, `update_alerts(AlertAction, ids)` |
 | Alerting rules | `alert_rules`, `alert_rule`, `create_alert_rule`, `update_alert_rule`, `delete_alert_rule`, `set_alert_rule_enabled`, `export_alert_rules` |
 | Logs | `logs(&LogQuery) -> LogPage`, with a cursor for following; `log_patterns` |
@@ -159,3 +159,5 @@ The client uses `reqwest` with rustls and works on any Tokio runtime. It spawns 
 ## License
 
 MIT OR Apache-2.0.
+
+The [incident contract](INCIDENTS.md) records response validation, missing values, bounded list semantics and additive API compatibility.
