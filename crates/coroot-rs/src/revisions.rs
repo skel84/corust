@@ -55,7 +55,7 @@ pub struct RevisionFinding {
     pub ok: bool,
     /// The server's text, e.g. `Availability: 99.9% (objective: 99%)`.
     pub message: String,
-    /// When it applies, if the server says (stuck rollouts only).
+    /// The revision's start time: the server stamps every summary finding with it.
     #[serde(
         default,
         with = "rfc3339_option",
@@ -202,7 +202,7 @@ fn revisions_from(
 }
 
 impl Project {
-    /// The deployment revisions of an application in the project's time window, with
+    /// The deployment revisions Coroot keeps for an application (its last 100), with
     /// [`DEFAULT_MAX_REVISIONS`] as the bound. See [`Project::deployment_revisions_with`].
     pub async fn deployment_revisions(&self, app: &AppId) -> Result<Vec<DeploymentRevision>> {
         self.deployment_revisions_with(app, DEFAULT_MAX_REVISIONS)
@@ -213,6 +213,11 @@ impl Project {
     /// `GET app/<id>`, in the order Coroot sends them (newest first). Works with any
     /// credentials. Empty when Coroot knows no deployment of the application.
     ///
+    /// **Which deployments.** Coroot keeps the last 100 deployments of each application;
+    /// that is the whole history available. The project's time window does not filter
+    /// them: it only decides whether the application exists, and an application it does
+    /// not know fails with [`ErrorKind::NotFound`](crate::ErrorKind::NotFound).
+    ///
     /// **Identity.** A revision is identified by [`DeploymentRevision::id`], the report's
     /// row id (`<hash>:<start unix seconds>`). `overview/deployments`
     /// ([`Project::deployments`]) has no id and only an inferred start time; use it for the
@@ -222,7 +227,10 @@ impl Project {
     /// deployment that has a metrics snapshot* and sends the outcome as text
     /// ([`RevisionFinding`]). It does not say which deployment that was, so this crate does
     /// not claim one: do not present a finding as a comparison with the revision listed
-    /// next to it.
+    /// next to it. Some findings are absolute, not comparisons at all (an objective breach,
+    /// an OOM kill, a crash, a memory leak), and a revision with no earlier snapshot is
+    /// compared with nothing. Read a finding as the server's verdict on the revision, never
+    /// as a diff.
     ///
     /// **Not available through Coroot's REST API** (so not provided here): a revision's
     /// historical Kubernetes spec (the current spec is not a stand-in), per-revision metric
@@ -251,8 +259,9 @@ impl Project {
     }
 }
 
-/// The default bound of [`Project::deployment_revisions`].
-pub const DEFAULT_MAX_REVISIONS: usize = 500;
+/// The default bound of [`Project::deployment_revisions`]: the number of deployments
+/// Coroot keeps per application.
+pub const DEFAULT_MAX_REVISIONS: usize = 100;
 
 #[cfg(test)]
 mod tests {
