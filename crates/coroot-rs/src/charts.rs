@@ -112,9 +112,11 @@ pub struct ChartHistory {
     /// The title of the chart group this chart belongs to, if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group: Option<String>,
-    /// The chart title. Coroot appends `(truncated range)` when it shortened the window.
+    /// The chart title. Coroot appends `(truncated range)` to it when it shortened the
+    /// window (to the group title for grouped charts).
     pub title: String,
-    /// Time of sample 0.
+    /// The chart's raw window start, as Coroot sent it. Sample 0 is at
+    /// [`ChartHistory::anchor`], which is this value truncated to a multiple of `step`.
     #[serde(with = "rfc3339_millis")]
     pub from: DateTime<Utc>,
     /// End of the chart's window.
@@ -123,7 +125,9 @@ pub struct ChartHistory {
     /// Spacing between samples.
     #[serde(rename = "step_seconds", with = "seconds")]
     pub step: Duration,
-    /// Whether Coroot shortened the requested window.
+    /// Whether Coroot shortened the requested window. For a chart in a group Coroot clears
+    /// the flag and puts `(truncated range)` on the group title instead; this is `true` in
+    /// that case too.
     #[serde(default)]
     pub truncated: bool,
     /// Whether the series are meant to be stacked.
@@ -141,17 +145,33 @@ pub struct ChartHistory {
 }
 
 impl ChartHistory {
-    /// The time of sample `i`: `from + i * step`.
+    /// The time of sample 0: `from` truncated down to a multiple of `step`.
+    ///
+    /// Coroot reads the data from the truncated bounds (`from.Truncate(step)`), so this is
+    /// where sample 0 really is. Coroot's UI places it at the raw `ctx.from` instead,
+    /// which is up to one step earlier than the data; this crate uses the data's anchor.
+    pub fn anchor(&self) -> DateTime<Utc> {
+        let step = self.step.as_millis() as i64;
+        let ms = self.from.timestamp_millis();
+        json::time_ms(ms - ms.rem_euclid(step)).unwrap_or(self.from)
+    }
+
+    /// The time of sample `i`: [`ChartHistory::anchor`]` + i * step`.
     pub fn point_time(&self, i: usize) -> Option<DateTime<Utc>> {
         let offset = self.step.checked_mul(u32::try_from(i).ok()?)?;
-        self.from
+        self.anchor()
             .checked_add_signed(chrono::Duration::from_std(offset).ok()?)
     }
 
-    /// How many samples a complete series has: `(to - from) / step`.
+    /// How many samples a complete series has: `(trunc(to) - trunc(from)) / step + 1`,
+    /// both bounds truncated to a multiple of `step` as Coroot does when it reads the data.
     pub fn expected_points(&self) -> usize {
-        let span = (self.to - self.from).num_milliseconds().max(0) as u128;
-        (span / self.step.as_millis().max(1)) as usize
+        let step = self.step.as_millis() as i64;
+        let trunc = |t: DateTime<Utc>| {
+            let ms = t.timestamp_millis();
+            ms - ms.rem_euclid(step)
+        };
+        ((trunc(self.to) - trunc(self.from)).max(0) / step) as usize + 1
     }
 }
 
@@ -211,6 +231,8 @@ pub struct ChartAnnotation {
     )]
     pub to: Option<DateTime<Utc>>,
 }
+
+const TRUNCATED_SUFFIX: &str = "(truncated range)";
 
 fn shape(field: &str) -> Error {
     Error::decode(format!(
@@ -302,7 +324,7 @@ fn series(v: &Value, expected: usize, budget: &mut Budget<'_>) -> Result<SeriesH
             if a.len() > budget.limits.max_points {
                 return Err(over("max_points"));
             }
-            // Coroot never sends a series longer than its window.
+            // Coroot never sends more than (trunc(to) - trunc(from)) / step + 1 points.
             if a.len() > expected {
                 return Err(shape("series data (longer than the chart window)"));
             }
@@ -340,7 +362,9 @@ fn chart(v: &Value, group: Option<&str>, budget: &mut Budget<'_>) -> Result<Char
     if budget.charts > budget.limits.max_charts {
         return Err(over("max_charts"));
     }
-    let (from, to, step, truncated) = context(v.get("ctx").unwrap_or(&Value::Null))?;
+    let (from, to, step, mut truncated) = context(v.get("ctx").unwrap_or(&Value::Null))?;
+    // Chart groups clear the flag and mark their own title instead.
+    truncated |= group.is_some_and(|g| g.ends_with(TRUNCATED_SUFFIX));
     let mut out = ChartHistory {
         group: group.map(str::to_string),
         title: required_str(v, "title")?.to_string(),
@@ -447,7 +471,8 @@ impl Project {
     /// What Coroot sends, and so what you get:
     ///
     /// - series values and a time context (`from`, `to`, `step`); sample *i* is at
-    ///   `from + i * step`, as in Coroot's UI. There are **no per-point timestamps and no
+    ///   [`ChartHistory::point_time`]: `from` truncated to the step, plus `i * step` (Coroot's
+    ///   UI draws it from the raw `from`, up to one step earlier). There are **no per-point timestamps and no
     ///   units**; use the chart title and series names, and treat units as unknown.
     /// - NaN and infinite samples both arrive as `null` and become `None`.
     /// - a series shorter than its window is reported as [`SeriesCoverage::Partial`]; an
@@ -482,15 +507,15 @@ mod tests {
     const APP: &str = "c1:shop:Deployment:api";
 
     fn ctx() -> Value {
-        // 6 points, 30 s apart.
-        json!({"from": 1790000000000_i64, "to": 1790000180000_i64, "step": 30000,
+        // Aligned bounds: (190000 - 10000) / 30000 + 1 = 7 points, 30 s apart.
+        json!({"from": 1790000010000_i64, "to": 1790000190000_i64, "step": 30000,
             "raw_step": 15000, "truncated": false})
     }
 
     fn chart_json(data: Value) -> Value {
         json!({"ctx": ctx(), "title": "Latency, seconds", "stacked": false,
             "series": [{"name": "p95", "data": data}], "threshold": null,
-            "annotations": [{"name": "incident", "x1": 1790000060000_i64, "x2": null, "icon": ""}]})
+            "annotations": [{"name": "incident", "x1": 1790000070000_i64, "x2": null, "icon": ""}]})
     }
 
     fn env(reports: Value) -> Envelope {
@@ -511,7 +536,7 @@ mod tests {
     #[test]
     fn places_samples_and_keeps_gaps() {
         let c = parse(report(
-            json!([{"chart": chart_json(json!([0.1, null, 0.3, 0.0, null, 0.5]))}]),
+            json!([{"chart": chart_json(json!([0.1, null, 0.3, 0.0, null, 0.5, 0.6]))}]),
         ))
         .unwrap();
         let (name, ch) = c.charts().next().unwrap();
@@ -519,21 +544,64 @@ mod tests {
         let s = &ch.series[0];
         assert_eq!(
             s.samples,
-            [Some(0.1), None, Some(0.3), Some(0.0), None, Some(0.5)]
+            [
+                Some(0.1),
+                None,
+                Some(0.3),
+                Some(0.0),
+                None,
+                Some(0.5),
+                Some(0.6)
+            ]
         );
-        assert_eq!(s.present(), 4);
+        assert_eq!(s.present(), 5);
         assert_eq!(s.coverage, SeriesCoverage::Full);
         assert_eq!(ch.step, Duration::from_secs(30));
-        assert_eq!(ch.expected_points(), 6);
-        assert_eq!(ch.point_time(2).unwrap().timestamp_millis(), 1790000060000);
+        assert_eq!(ch.expected_points(), 7);
+        assert_eq!(ch.point_time(2).unwrap().timestamp_millis(), 1790000070000);
         assert_eq!(
             ch.annotations[0].from.unwrap().timestamp_millis(),
-            1790000060000
+            1790000070000
         );
         assert!(ch.annotations[0].to.is_none());
         // Round trip through the stable JSON form.
         let back: AppCharts = serde_json::from_value(serde_json::to_value(&c).unwrap()).unwrap();
         assert_eq!(back, c);
+    }
+
+    #[test]
+    fn unaligned_bounds_give_one_more_point_anchored_at_the_truncated_start() {
+        // Raw from is 15 s past a step boundary; the data starts at the boundary and has
+        // (trunc(to) - trunc(from)) / step + 1 = 7 points, one more than raw span / step (5).
+        let mut ch = chart_json(json!([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]));
+        ch["ctx"]["from"] = json!(1790000025000_i64);
+        ch["ctx"]["to"] = json!(1790000199000_i64);
+        let c = parse(report(json!([{"chart": ch.clone()}]))).unwrap();
+        let h = &c.reports[0].charts[0];
+        assert_eq!(h.expected_points(), 7);
+        assert_eq!(h.series[0].coverage, SeriesCoverage::Full);
+        assert_eq!(h.anchor().timestamp_millis(), 1790000010000);
+        assert_eq!(h.point_time(0).unwrap().timestamp_millis(), 1790000010000);
+        assert_eq!(h.point_time(6).unwrap().timestamp_millis(), 1790000190000);
+        // One point too many is still malformed.
+        ch["series"][0]["data"] = json!([1, 2, 3, 4, 5, 6, 7, 8]);
+        assert!(parse(report(json!([{"chart": ch}]))).is_err());
+    }
+
+    #[test]
+    fn grouped_charts_read_truncation_from_the_group_title() {
+        let g = |title: &str| {
+            parse(report(
+                json!([{"chart_group": {"title": title, "charts": [chart_json(json!([1.0]))]}}]),
+            ))
+            .unwrap()
+        };
+        assert!(g("Containers (truncated range)").reports[0].charts[0].truncated);
+        assert!(!g("Containers").reports[0].charts[0].truncated);
+        // A plain chart keeps the flag from its own ctx.
+        let mut ch = chart_json(json!([1.0]));
+        ch["ctx"]["truncated"] = json!(true);
+        assert!(parse(report(json!([{"chart": ch}]))).unwrap().reports[0].charts[0].truncated);
     }
 
     #[test]
@@ -577,7 +645,7 @@ mod tests {
             with(&|c| c["series"] = json!({})),
             with(&|c| c["series"][0]["data"] = json!(["1"])),
             with(&|c| c["series"][0]["data"] = json!(true)),
-            with(&|c| c["series"][0]["data"] = json!([0, 0, 0, 0, 0, 0, 0])),
+            with(&|c| c["series"][0]["data"] = json!([0, 0, 0, 0, 0, 0, 0, 0])),
             with(&|c| c["annotations"][0]["x1"] = json!("soon")),
             json!([{"status": "ok", "widgets": []}]),
             json!([null]),
