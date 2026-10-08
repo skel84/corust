@@ -59,10 +59,10 @@ fn app_data() -> Value {
         "reports": [{
             "name": "SLO", "status": "warning", "checks": [],
             "widgets": [{"chart": {
-                "ctx": {"from": 1790000000000_i64, "to": 1790000120000_i64, "step": 30000,
+                "ctx": {"from": 1790000010000_i64, "to": 1790000130000_i64, "step": 30000,
                         "raw_step": 15000, "truncated": false},
                 "title": "Requests, per second",
-                "series": [{"name": "ok", "data": [1.5, null, 2.5, 3.0]}],
+                "series": [{"name": "ok", "data": [1.5, null, 2.5, 3.0, 4.0]}],
                 "threshold": null, "annotations": null}}]
         }]
     })
@@ -78,7 +78,7 @@ async fn reads_charts_from_the_app_route() {
     assert_eq!(chart.series[0].samples[1], None);
     assert_eq!(
         chart.point_time(3).unwrap().timestamp_millis(),
-        1790000090000
+        1790000100000
     );
     let requests = seen.lock().unwrap();
     assert_eq!(requests.len(), 1);

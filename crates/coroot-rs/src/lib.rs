@@ -59,7 +59,8 @@
 //!
 //! [`Project::app_charts`] decodes the chart widgets Coroot sends with an application's
 //! reports (`GET app/<id>`). The server sends a time context (`from`, `to`, `step`) and bare
-//! sample arrays: sample *i* is at `from + i * step`, as in Coroot's UI. It sends **no
+//! sample arrays: sample *i* is at `from` truncated to the step plus `i * step` (Coroot's UI draws it from
+//! the raw `from`, up to one step earlier). It sends **no
 //! units and no per-point timestamps**, NaN and infinite samples both arrive as `null`,
 //! and a series' own start is not sent. Coverage is reported ([`SeriesCoverage`]), gaps stay
 //! `None`, and history is limited to the project's time window. This crate never derives a
