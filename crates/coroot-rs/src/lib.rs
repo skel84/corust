@@ -65,6 +65,16 @@
 //! `None`, and history is limited to the project's time window. This crate never derives a
 //! history from the summary values of [`Project::app_health`].
 //!
+//! # Deployment comparison
+//!
+//! [`Project::deployment_revisions`] lists an application's deployments with a stable id
+//! (the Deployments report's row id, `<hash>:<start unix seconds>`) and the findings
+//! Coroot attaches to each. Coroot compares a revision with the previous deployment that
+//! has a metrics snapshot and does not say which one, so none is claimed. Coroot's REST API
+//! offers **no** historical Kubernetes spec for a revision, no per-revision metric
+//! snapshots and no comparison of two revisions you choose; this crate does not
+//! approximate them (the current spec is not a past one).
+//!
 //! # Coroot versions
 //!
 //! Tested with Coroot 1.14+. Operations an older server does not support fail with
@@ -78,6 +88,7 @@ mod id;
 mod json;
 mod mcp;
 mod project;
+mod revisions;
 mod status;
 mod time;
 pub mod util;
@@ -98,6 +109,7 @@ pub use error::{Error, ErrorKind, Result};
 pub use id::AppId;
 pub use mcp::{Listing, McpSession, ToolOutput};
 pub use project::{Project, match_app};
+pub use revisions::{DEFAULT_MAX_REVISIONS, DeploymentRevision, RevisionFinding};
 pub use status::Status;
 pub use time::TimeRange;
 
