@@ -151,7 +151,7 @@ impl ChartHistory {
     /// where sample 0 really is. Coroot's UI places it at the raw `ctx.from` instead,
     /// which is up to one step earlier than the data; this crate uses the data's anchor.
     pub fn anchor(&self) -> DateTime<Utc> {
-        let step = self.step.as_millis() as i64;
+        let step = (self.step.as_millis() as i64).max(1);
         let ms = self.from.timestamp_millis();
         json::time_ms(ms - ms.rem_euclid(step)).unwrap_or(self.from)
     }
@@ -166,7 +166,7 @@ impl ChartHistory {
     /// How many samples a complete series has: `(trunc(to) - trunc(from)) / step + 1`,
     /// both bounds truncated to a multiple of `step` as Coroot does when it reads the data.
     pub fn expected_points(&self) -> usize {
-        let step = self.step.as_millis() as i64;
+        let step = (self.step.as_millis() as i64).max(1);
         let trunc = |t: DateTime<Utc>| {
             let ms = t.timestamp_millis();
             ms - ms.rem_euclid(step)
@@ -567,6 +567,20 @@ mod tests {
         // Round trip through the stable JSON form.
         let back: AppCharts = serde_json::from_value(serde_json::to_value(&c).unwrap()).unwrap();
         assert_eq!(back, c);
+    }
+
+    #[test]
+    fn zero_step_does_not_panic() {
+        let c = parse(report(json!([{"chart": chart_json(json!([1.0]))}]))).unwrap();
+        for step in [Duration::ZERO, Duration::from_micros(500)] {
+            let h = ChartHistory {
+                step,
+                ..c.reports[0].charts[0].clone()
+            };
+            assert_eq!(h.anchor(), h.from);
+            assert!(h.expected_points() >= 1);
+            assert_eq!(h.point_time(0), Some(h.from));
+        }
     }
 
     #[test]
