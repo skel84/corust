@@ -76,6 +76,10 @@
 //! snapshots and no comparison of two revisions you choose; this crate does not
 //! approximate them (the current spec is not a past one).
 //!
+//! Both read `GET app/<id>`. A caller that already holds that answer, read with
+//! [`Project::get`], decodes it with [`AppCharts::from_envelope`] and
+//! [`DeploymentRevision::list_from_envelope`] instead, so one request feeds both.
+//!
 //! # Coroot versions
 //!
 //! Tested with Coroot 1.14+. Operations an older server does not support fail with

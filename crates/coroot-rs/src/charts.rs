@@ -82,6 +82,18 @@ pub struct AppCharts {
 }
 
 impl AppCharts {
+    /// Decodes the chart histories from an answer of `GET app/<id>` the caller already
+    /// has, such as one read with [`Project::get`], so one answer can feed several
+    /// decoders. [`Project::app_charts_with`] is this after its own request, and the
+    /// contract is the same: invalid `limits` or an empty `app` fail with
+    /// [`ErrorKind::InvalidInput`](crate::ErrorKind::InvalidInput), anything else wrong
+    /// with [`ErrorKind::Decode`](crate::ErrorKind::Decode).
+    pub fn from_envelope(env: &Envelope, app: &AppId, limits: &ChartLimits) -> Result<Self> {
+        limits.validate()?;
+        check_app(app)?;
+        app_charts_from(env, app, limits)
+    }
+
     /// All charts with the name of their report.
     pub fn charts(&self) -> impl Iterator<Item = (&str, &ChartHistory)> {
         self.reports
@@ -402,6 +414,14 @@ fn chart(v: &Value, group: Option<&str>, budget: &mut Budget<'_>) -> Result<Char
     Ok(out)
 }
 
+/// An empty application id is the caller's mistake, refused before any request.
+pub(crate) fn check_app(app: &AppId) -> Result<()> {
+    if app.as_str().is_empty() {
+        return Err(Error::invalid("application id is empty"));
+    }
+    Ok(())
+}
+
 /// Checks the `{context, data}` envelope of `GET app/<id>` and returns `data.reports`.
 /// `data: null` (Coroot has no world for the project yet) is an error, never "no reports".
 pub(crate) fn app_reports<'a>(env: &'a Envelope, app: &AppId) -> Result<&'a [Value]> {
@@ -489,13 +509,11 @@ impl Project {
     /// [`Project::app_health`].
     pub async fn app_charts_with(&self, app: &AppId, limits: ChartLimits) -> Result<AppCharts> {
         limits.validate()?;
-        if app.as_str().is_empty() {
-            return Err(Error::invalid("application id is empty"));
-        }
+        check_app(app)?;
         let env = self
             .get(&format!("app/{}", encode_segment(app.as_str())), &[])
             .await?;
-        app_charts_from(&env, app, &limits)
+        AppCharts::from_envelope(&env, app, &limits)
     }
 }
 
