@@ -6,7 +6,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::charts::app_reports;
+use crate::charts::{app_reports, check_app};
+use crate::client::Envelope;
 use crate::error::{Error, Result};
 use crate::id::AppId;
 use crate::json::{self, null_default, rfc3339::option as rfc3339_option};
@@ -148,11 +149,32 @@ fn revision(row: &Value) -> Result<DeploymentRevision> {
     })
 }
 
-fn revisions_from(
-    env: &crate::client::Envelope,
-    app: &AppId,
-    max: usize,
-) -> Result<Vec<DeploymentRevision>> {
+fn check_bound(max_revisions: usize) -> Result<()> {
+    if max_revisions == 0 {
+        return Err(Error::invalid("max_revisions must be at least 1"));
+    }
+    Ok(())
+}
+
+impl DeploymentRevision {
+    /// Decodes the revisions from an answer of `GET app/<id>` the caller already has, such
+    /// as one read with [`Project::get`], so one answer can feed several decoders.
+    /// [`Project::deployment_revisions_with`] is this after its own request, and the
+    /// contract is the same: `max_revisions == 0` or an empty `app` fail with
+    /// [`ErrorKind::InvalidInput`](crate::ErrorKind::InvalidInput), anything else wrong
+    /// with [`ErrorKind::Decode`](crate::ErrorKind::Decode).
+    pub fn list_from_envelope(
+        env: &Envelope,
+        app: &AppId,
+        max_revisions: usize,
+    ) -> Result<Vec<Self>> {
+        check_bound(max_revisions)?;
+        check_app(app)?;
+        revisions_from(env, app, max_revisions)
+    }
+}
+
+fn revisions_from(env: &Envelope, app: &AppId, max: usize) -> Result<Vec<DeploymentRevision>> {
     let reports = app_reports(env, app)?;
     let mut found = reports
         .iter()
@@ -246,16 +268,12 @@ impl Project {
         app: &AppId,
         max_revisions: usize,
     ) -> Result<Vec<DeploymentRevision>> {
-        if max_revisions == 0 {
-            return Err(Error::invalid("max_revisions must be at least 1"));
-        }
-        if app.as_str().is_empty() {
-            return Err(Error::invalid("application id is empty"));
-        }
+        check_bound(max_revisions)?;
+        check_app(app)?;
         let env = self
             .get(&format!("app/{}", encode_segment(app.as_str())), &[])
             .await?;
-        revisions_from(&env, app, max_revisions)
+        DeploymentRevision::list_from_envelope(&env, app, max_revisions)
     }
 }
 
