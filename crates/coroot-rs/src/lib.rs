@@ -55,6 +55,16 @@
 //!
 //! A [`Project`] carries a [`TimeRange`]. The default leaves it to Coroot (the last hour).
 //!
+//! # Chart histories
+//!
+//! [`Project::app_charts`] decodes the chart widgets Coroot sends with an application's
+//! reports (`GET app/<id>`). The server sends a time context (`from`, `to`, `step`) and bare
+//! sample arrays: sample *i* is at `from + i * step`, as in Coroot's UI. It sends **no
+//! units and no per-point timestamps**, NaN and infinite samples both arrive as `null`,
+//! and a series' own start is not sent. Coverage is reported ([`SeriesCoverage`]), gaps stay
+//! `None`, and history is limited to the project's time window. This crate never derives a
+//! history from the summary values of [`Project::app_health`].
+//!
 //! # Coroot versions
 //!
 //! Tested with Coroot 1.14+. Operations an older server does not support fail with
@@ -74,6 +84,7 @@ pub mod util;
 
 mod alerts;
 mod apps;
+mod charts;
 mod incidents;
 mod logs;
 mod map;
@@ -94,6 +105,10 @@ pub use alerts::{Alert, AlertAction, AlertDetail, AlertQuery, AlertRule, AlertSt
 pub use apps::{
     AppHealth, Application, Chart, ClientLink, Dependency, Issue, Latency, LogPatternSummary,
     Report, SeriesSummary, Signal,
+};
+pub use charts::{
+    AppCharts, ChartAnnotation, ChartHistory, ChartLimits, ReportCharts, SeriesCoverage,
+    SeriesHistory,
 };
 pub use incidents::{
     BurnRate, Incident, IncidentQuery, IncidentState, IncidentView, Propagation, Rca, Slo,
