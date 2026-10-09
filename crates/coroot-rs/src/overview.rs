@@ -154,7 +154,11 @@ impl Project {
         })
     }
 
-    /// Deployments in the time window, newest first.
+    /// Every deployment Coroot keeps for the applications present in the time window,
+    /// newest first. The window picks the applications, not the deployments: an
+    /// application's older deployments are listed too. Coroot sends no id, and the start
+    /// time is inferred from the link's window. For one application's revisions with a
+    /// stable id, use [`Project::deployment_revisions`].
     pub async fn deployments(&self) -> Result<Vec<Deployment>> {
         let env = self.get("overview/deployments", &[]).await?;
         Ok(json::arr_p(&env.data, "/deployments")

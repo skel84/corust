@@ -80,6 +80,17 @@
 //! [`Project::get`], decodes it with [`AppCharts::from_envelope`] and
 //! [`DeploymentRevision::list_from_envelope`] instead, so one request feeds both.
 //!
+//! What can honestly be compared is the application's own charts before and after a
+//! revision started: [`Project::charts_around`] reads them over a window around the start
+//! and says which samples fall on each side ([`ChartSplit`], [`SideCoverage`]). It
+//! computes nothing across the split. Coroot does not send when a rollout finished, so
+//! "after" includes the rollout. When the application has no metrics in the window (the
+//! window starts after Coroot's newest data, or the application sent none in it) Coroot
+//! answers 404 "Application not found", which is [`AroundRevision::NoData`]; a mistyped
+//! application id gets the same answer, so pass a revision read from that application. A
+//! caller that decodes more of the answer reads it with [`Project::get`] over
+//! [`RevisionWindow::range`] and tells that 404 apart with [`AroundRevision::is_no_data`].
+//!
 //! # Coroot versions
 //!
 //! Tested with Coroot 1.14+. Operations an older server does not support fail with
@@ -100,6 +111,7 @@ pub mod util;
 
 mod alerts;
 mod apps;
+mod around;
 mod charts;
 mod incidents;
 mod logs;
@@ -123,6 +135,7 @@ pub use apps::{
     AppHealth, Application, Chart, ClientLink, Dependency, Issue, Latency, LogPatternSummary,
     Report, SeriesSummary, Signal,
 };
+pub use around::{AroundRevision, ChartSplit, RevisionCharts, RevisionWindow, SideCoverage};
 pub use charts::{
     AppCharts, ChartAnnotation, ChartHistory, ChartLimits, ReportCharts, SeriesCoverage,
     SeriesHistory,
