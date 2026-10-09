@@ -84,8 +84,12 @@
 //! revision started: [`Project::charts_around`] reads them over a window around the start
 //! and says which samples fall on each side ([`ChartSplit`], [`SideCoverage`]). It
 //! computes nothing across the split. Coroot does not send when a rollout finished, so
-//! "after" includes the rollout; and it answers 404 for a window older than its cache,
-//! which is [`AroundRevision::NoData`], never "no such application".
+//! "after" includes the rollout. When the application has no metrics in the window (the
+//! window starts after Coroot's newest data, or the application sent none in it) Coroot
+//! answers 404 "Application not found", which is [`AroundRevision::NoData`]; a mistyped
+//! application id gets the same answer, so pass a revision read from that application. A
+//! caller that decodes more of the answer reads it with [`Project::get`] over
+//! [`RevisionWindow::range`] and tells that 404 apart with [`AroundRevision::is_no_data`].
 //!
 //! # Coroot versions
 //!

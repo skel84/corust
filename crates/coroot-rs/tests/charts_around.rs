@@ -58,10 +58,14 @@ async fn project_answering(status: &str, body: String) -> (Project, Arc<Mutex<Ve
 }
 
 fn revision() -> DeploymentRevision {
+    revision_at(STARTED)
+}
+
+fn revision_at(started: i64) -> DeploymentRevision {
     DeploymentRevision {
-        id: format!("7b8e21:{STARTED}"),
+        id: format!("7b8e21:{started}"),
         hash: "7b8e21".into(),
-        started_at: DateTime::from_timestamp(STARTED, 0).unwrap(),
+        started_at: DateTime::from_timestamp(started, 0).unwrap(),
         version: "7b8e21: api:1.4.0".into(),
         status: Status::Ok,
         findings: Vec::new(),
@@ -71,13 +75,18 @@ fn revision() -> DeploymentRevision {
 
 /// Five places 30 s apart from 1790000010 s; the window asked for ends at `to_ms`.
 fn response(to_ms: i64, data: Value) -> String {
+    response_from(1790000010000, to_ms, false, data)
+}
+
+/// One chart with a 30 s step over Coroot's `ctx` from `from_ms` to `to_ms`.
+fn response_from(from_ms: i64, to_ms: i64, truncated: bool, data: Value) -> String {
     json!({"context": {"status": {"status": "ok"}}, "data": {
         "app_map": {"application": {"id": APP}},
         "reports": [{
             "name": "SLO", "status": "ok", "checks": [],
             "widgets": [{"chart": {
-                "ctx": {"from": 1790000010000_i64, "to": to_ms, "step": 30000,
-                        "raw_step": 15000, "truncated": false},
+                "ctx": {"from": from_ms, "to": to_ms, "step": 30000,
+                        "raw_step": 15000, "truncated": truncated},
                 "title": "Requests, per second",
                 "series": [{"name": "ok", "data": data}],
                 "threshold": null,
@@ -127,6 +136,81 @@ async fn reads_the_window_around_the_start_and_splits_it() {
 }
 
 #[tokio::test]
+async fn an_unaligned_window_splits_from_the_data_anchor() {
+    // A start at 1790000085 s puts `from` at 1790000025 s, between two 30 s places. Coroot
+    // reads the data from 1790000010 s, so the places are 10, 40, 70, 100 and 130 s past
+    // 1790000000 s: three before the start and two after.
+    let body = response_from(
+        1790000025000,
+        1790000145000,
+        false,
+        json!([1.0, 1.0, 1.0, 2.0, 2.0]),
+    );
+    let (project, seen) = project_answering("200 OK", body).await;
+    let got = project
+        .charts_around(
+            &AppId::new(APP),
+            &revision_at(1790000085),
+            RevisionWindow::both(Duration::from_secs(60)),
+        )
+        .await
+        .unwrap();
+    let AroundRevision::Charts(around) = got else {
+        panic!("expected charts, got {got:?}");
+    };
+    let line = seen.lock().unwrap()[0].clone();
+    assert!(line.contains("from=1790000025000"), "{line}");
+    assert!(line.contains("to=1790000145000"), "{line}");
+    let (_, chart) = around.charts.charts().next().unwrap();
+    let split = around.split(chart);
+    assert_eq!(
+        split,
+        ChartSplit {
+            before: 3,
+            after: 2
+        }
+    );
+    assert_eq!(
+        chart.series[0].sides(&split),
+        (Some(SideCoverage::Full), Some(SideCoverage::Full))
+    );
+    assert!(!around.ends_early(chart));
+}
+
+#[tokio::test]
+async fn a_truncated_chart_splits_from_its_own_start() {
+    // Coroot shortened the window to start at 1790000040 s: four places, one before the
+    // start at 1790000070 s.
+    let body = response_from(
+        1790000040000,
+        1790000130000,
+        true,
+        json!([1.0, 2.0, 2.0, 2.0]),
+    );
+    let (project, _) = project_answering("200 OK", body).await;
+    let got = project
+        .charts_around(
+            &AppId::new(APP),
+            &revision(),
+            RevisionWindow::both(Duration::from_secs(60)),
+        )
+        .await
+        .unwrap();
+    let AroundRevision::Charts(around) = got else {
+        panic!("expected charts, got {got:?}");
+    };
+    let (_, chart) = around.charts.charts().next().unwrap();
+    assert!(chart.truncated);
+    assert_eq!(
+        around.split(chart),
+        ChartSplit {
+            before: 1,
+            after: 3
+        }
+    );
+}
+
+#[tokio::test]
 async fn a_window_past_the_newest_data_ends_early() {
     // Coroot cut the window at its newest data, 30 s after the start.
     let body = response(1790000100000, json!([1.0, 1.0, 2.0, 2.0]));
@@ -153,8 +237,10 @@ async fn a_window_past_the_newest_data_ends_early() {
     );
 }
 
+/// Coroot's own 404 for the window. A mistyped application id gets the same answer, which is
+/// why the revision must come from the application.
 #[tokio::test]
-async fn a_404_for_the_window_is_no_data_not_a_missing_application() {
+async fn coroots_404_for_the_window_is_no_data() {
     let (project, _) = project_answering("404 Not Found", "Application not found\n".into()).await;
     let got = project
         .charts_around(&AppId::new(APP), &revision(), RevisionWindow::default())
@@ -181,6 +267,12 @@ async fn refusals_and_unsupported_answers_stay_errors() {
             "404 Not Found",
             "404 page not found",
             ErrorKind::Unsupported,
+        ),
+        // A proxy's 404 page says nothing about the window.
+        (
+            "404 Not Found",
+            "<html><body><h1>404 Not Found</h1></body></html>",
+            ErrorKind::NotFound,
         ),
         ("500 Internal Server Error", "", ErrorKind::Server),
     ] {

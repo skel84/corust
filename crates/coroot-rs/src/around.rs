@@ -26,7 +26,8 @@ pub struct RevisionWindow {
 }
 
 impl RevisionWindow {
-    /// The shortest side: one minute, Coroot's coarsest step for windows up to six hours.
+    /// The shortest side: one minute. A shorter side holds a sample or two at most of
+    /// Coroot's steps.
     pub const MIN_SIDE: Duration = Duration::from_secs(60);
     /// The longest side: twelve hours.
     pub const MAX_SIDE: Duration = Duration::from_secs(12 * 3600);
@@ -37,6 +38,16 @@ impl RevisionWindow {
             before: side,
             after: side,
         }
+    }
+
+    /// The window around `started_at` as a [`TimeRange`], for a caller that reads
+    /// `GET app/<id>` itself with [`Project::get`] to decode more of the answer than
+    /// [`Project::charts_around`] does. It is checked and rounded as `charts_around` checks
+    /// and rounds it: an invalid side fails with [`ErrorKind::InvalidInput`].
+    pub fn range(&self, started_at: DateTime<Utc>) -> Result<TimeRange> {
+        self.validate()?;
+        let (from, to) = self.bounds(started_at)?;
+        Ok(TimeRange::between(from, to))
     }
 
     fn validate(&self) -> Result<()> {
@@ -77,14 +88,18 @@ impl Default for RevisionWindow {
 /// What Coroot answered for the window around a revision.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "outcome")]
+#[non_exhaustive]
 pub enum AroundRevision {
     /// Coroot answered with the application's charts for the window.
     Charts(RevisionCharts),
-    /// Coroot answered 404 for this window. It does so when its metric cache does not
-    /// reach the window (older than its retention, 30 days by default, or not yet
-    /// written) as well as when the application had no data in it, and the answer does not
-    /// say which. It is not "the application does not exist": the revision was read from
-    /// the application.
+    /// Coroot answered 404 "Application not found" for this window
+    /// ([`AroundRevision::is_no_data`]): the application has no metrics in the window
+    /// Coroot built. That is the case when the window starts after Coroot's newest data,
+    /// when the application sent no metrics in it (it wasn't running, or the window is
+    /// older than the cache keeps, 30 days by default), and also when the application id
+    /// names no application at all. The answer can't tell these apart, so a revision must
+    /// come from the same application ([`Project::deployment_revisions`]); then this
+    /// means no data for the window, not a missing application.
     NoData {
         /// The revision id.
         revision: String,
@@ -116,6 +131,19 @@ pub struct RevisionCharts {
     pub charts: AppCharts,
 }
 
+impl AroundRevision {
+    /// Whether `error` is Coroot's own 404 for an application missing from the window it
+    /// built, the body `Application not found`. Any other 404, such as a proxy's page,
+    /// isn't: it says nothing about the window. For a caller that reads the window with
+    /// [`Project::get`] over [`RevisionWindow::range`].
+    pub fn is_no_data(error: &Error) -> bool {
+        error.kind() == ErrorKind::NotFound && error.message().trim() == NO_APPLICATION
+    }
+}
+
+/// The body of Coroot's 404 for an application missing from the window it built.
+const NO_APPLICATION: &str = "Application not found";
+
 impl RevisionCharts {
     /// Where each chart's samples fall around the revision's start.
     pub fn split(&self, chart: &ChartHistory) -> ChartSplit {
@@ -143,6 +171,7 @@ pub struct ChartSplit {
 /// How one series covers one side of an instant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "coverage")]
+#[non_exhaustive]
 pub enum SideCoverage {
     /// Every sample on this side is present.
     Full,
@@ -156,7 +185,9 @@ pub enum SideCoverage {
     /// No sample on this side is present.
     Empty,
     /// The series is shorter than its window ([`SeriesCoverage::Partial`]) and Coroot does
-    /// not send where it starts, so which side its samples fall on is unknown.
+    /// not send where it starts, so which side its samples fall on is unknown. A split
+    /// made for another chart, whose places run past this series' samples, is unplaced
+    /// too.
     Unplaced,
 }
 
@@ -194,10 +225,11 @@ impl SeriesHistory {
                 SeriesCoverage::Empty => SideCoverage::Empty,
                 SeriesCoverage::Full => {
                     let expected = range.len();
-                    let present = self
-                        .samples
-                        .get(range)
-                        .map_or(0, |s| s.iter().flatten().count());
+                    // A split from another chart can run past the samples.
+                    let Some(samples) = self.samples.get(range) else {
+                        return Some(SideCoverage::Unplaced);
+                    };
+                    let present = samples.iter().flatten().count();
                     match present {
                         0 => SideCoverage::Empty,
                         p if p == expected => SideCoverage::Full,
@@ -210,7 +242,7 @@ impl SeriesHistory {
             })
         };
         let at = split.before;
-        (side(0..at), side(at..at + split.after))
+        (side(0..at), side(at..at.saturating_add(split.after)))
     }
 }
 
@@ -243,13 +275,19 @@ impl Project {
     ///   rollout finished, so "after" includes the rollout itself. Its own findings
     ///   ([`DeploymentRevision::findings`]) are measured on a snapshot taken after the
     ///   rollout finished; nothing here recomputes them.
-    /// - Coroot picks the step from the window's length: its cache step up to an hour,
-    ///   one minute up to six hours, then five, ten and fifteen.
+    /// - **The first sample after the start can hold data from before it.** A sample
+    ///   aggregates its step, and Prometheus' queries look back further, so the side a
+    ///   sample falls on is where it is placed, not all of what it measured.
+    /// - Coroot picks the step from the window's length: its cache step up to an hour
+    ///   (whatever that step is), at least one minute up to six hours, five minutes up to
+    ///   twelve and ten minutes up to the longest window, 24 hours.
     /// - A window ending after Coroot's newest data is cut there; see
     ///   [`RevisionCharts::ends_early`].
-    /// - A 404 for the window is [`AroundRevision::NoData`], not an error: Coroot answers
-    ///   so when it has no data that far back, and the answer cannot tell that from an
-    ///   application missing in the window.
+    /// - Coroot's 404 "Application not found" for the window is [`AroundRevision::NoData`],
+    ///   not an error. It means the application has no metrics in the window, and it is
+    ///   also what an application id that names no application gets, so `revision` must
+    ///   be one read from `app` ([`Project::deployment_revisions`]). Nothing ties the two
+    ///   together here. Any other 404 stays an error.
     ///
     /// An invalid `window` (a side under a minute or over twelve hours), invalid `limits`
     /// or an empty `app` fail with [`ErrorKind::InvalidInput`] before any request is sent.
@@ -274,7 +312,7 @@ impl Project {
                 to,
                 charts,
             })),
-            Err(e) if e.kind() == ErrorKind::NotFound => Ok(AroundRevision::NoData {
+            Err(e) if AroundRevision::is_no_data(&e) => Ok(AroundRevision::NoData {
                 revision: revision.id.clone(),
                 from,
                 to,
@@ -392,6 +430,53 @@ mod tests {
             after: 7,
         };
         assert_eq!(all.series[0].sides(&edge), (None, Some(SideCoverage::Full)));
+        // A split from a longer chart runs past the samples: unplaced, not empty.
+        let foreign = ChartSplit {
+            before: 3,
+            after: 9,
+        };
+        assert_eq!(
+            all.series[0].sides(&foreign),
+            (Some(SideCoverage::Full), Some(SideCoverage::Unplaced))
+        );
+        let huge = ChartSplit {
+            before: 3,
+            after: usize::MAX,
+        };
+        assert_eq!(
+            all.series[0].sides(&huge),
+            (Some(SideCoverage::Full), Some(SideCoverage::Unplaced))
+        );
+    }
+
+    #[test]
+    fn a_truncated_chart_splits_from_its_own_start() {
+        // Coroot moved the window's start to 1790000100000, so the chart has four places
+        // 30 s apart from there. A start at 1790000110000 has one of them before it.
+        let mut c = chart(vec![Some(1.0); 4], SeriesCoverage::Full);
+        c.from = at(1790000100000);
+        c.truncated = true;
+        assert_eq!(c.expected_points(), 4);
+        assert_eq!(
+            c.split_at(at(1790000110000)),
+            ChartSplit {
+                before: 1,
+                after: 3
+            }
+        );
+    }
+
+    #[test]
+    fn only_coroots_own_404_is_no_data() {
+        let no_data = |kind, body: &str| AroundRevision::is_no_data(&Error::new(kind, body));
+        assert!(no_data(ErrorKind::NotFound, "Application not found"));
+        assert!(no_data(ErrorKind::NotFound, "Application not found\n"));
+        assert!(!no_data(
+            ErrorKind::NotFound,
+            "<html><body>Not Found</body></html>"
+        ));
+        assert!(!no_data(ErrorKind::NotFound, "project not found"));
+        assert!(!no_data(ErrorKind::Server, "Application not found"));
     }
 
     #[test]
@@ -418,6 +503,17 @@ mod tests {
             .unwrap();
         assert_eq!(from.timestamp_millis(), 1789999909000);
         assert_eq!(to.timestamp_millis(), 1790000090000);
+        // The public range is the same window, and checked the same way.
+        let range = ok.range(at(1790000000000)).unwrap();
+        assert_eq!(range.from.unwrap().timestamp(), 1790000000 - 1800);
+        assert_eq!(range.to.unwrap().timestamp(), 1790000000 + 1800);
+        assert_eq!(
+            RevisionWindow::both(Duration::from_secs(30))
+                .range(at(1790000000000))
+                .unwrap_err()
+                .kind(),
+            ErrorKind::InvalidInput
+        );
     }
 
     #[test]
